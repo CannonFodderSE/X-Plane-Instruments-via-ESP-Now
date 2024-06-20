@@ -30,4 +30,7 @@ Before 3.0.0 it used the below format:
 From 3.0.0 on it uses the below format:
 
 	void OnDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int data_len)
+
+ Image below shows a 4-digit display with magnetic compass bearing received from X-Plane.
 	
+![TM1637-4Digit](https://github.com/CannonFodderSE/X-Plane-Instruments-via-ESP-Now/assets/24999186/febc495c-bab7-468d-8563-772487e02edb)

@@ -1,0 +1,354 @@
+/*
+  xplaneUDP_ESPNow
+  Author: Randy S. Bancroft
+  Email: CannonFodderSE@gmail.com
+
+  Reads X-Plane Datarefs sent to an ESP32 board received on a WiFi port
+  and sends it to one or multiple receiving ESP32's using Espressif's ESP-Now
+  communication protocol.
+
+  Data is broadcasted to all listening receivers.  May be configured to send to
+  one unit, unicast packets, by entering the receiving units MAC in the 
+  "broadcastAddress" in "ESP-Now Configuration" below.  Transmitter and
+  receivers must use the same systemID.  See "ESP-Now Configuration" below.
+  Multiple systems can be operated in the same vicinity.  In accordance with 
+  Espressif "If unicast packets are used, up to 20 devices can be paired and
+  controlled at the same time. If broadcast packets are used, theoretically
+  there is no limitation in the number of devices that can be controlled.
+  ESP-NOW has a limited signal range, typically around 220 meters under ideal
+  conditions. The actual range can vary depending on factors like environmental
+  interference, antenna design, and obstacles in the communication path"
+
+  Warning:  If any setting used in an Instrument board is changed inside X-Plane
+  it will be switched to the Instrument board on the next mass update.
+
+  This code is in the public domain.
+*/
+
+// ESP32 by Espressif Systems
+// https://github.com/espressif/arduino-esp32
+// Intalled with boards manager
+#include <esp_now.h>
+// WiFi  installed as part of ESP32 boards package
+#include "WiFi.h"
+// AsyncUDP installed as part of ESP32 boards package
+#include "AsyncUDP.h"
+
+// RingBuffer by Jean-Luc - Locoduino 
+// https://github.com/Locoduino/RingBuffer
+// Install through library
+#include <RingBuf.h>  // RingBuffer by Jean-Luc - Locoduino https://github.com/Locoduino/RingBuffer
+
+// Roll over feature
+// If the millis() count maxes out and rolls over to zero
+// we want to reset the board to prevent unexpected behavior
+// from happening
+// It takes 49 days of continuios use to roll over.
+ulong rollover = 0;
+
+// ************************************************************************************************
+// X-Plane configuration
+  // Maximum length of Dataref key
+  // At the time of writing this program, the longest official Dataref was 
+  // between 170 to 180 charaters
+  // All data in a single ESP-Now packet cannot exceed 250 bytes
+  const int datarefKey_length = 200;  // Maximum length of Dataref key
+  const char DREF[4]{0x44, 0x52, 0x45, 0x46};  // Dataref signature, hex for "DREF"
+  
+// EndX-Plane configuration
+// ************************************************************************************************
+
+// ************************************************************************************************
+// WiFi Configuration
+  #define WIFI_CHANNEL 1
+  const char* ssid = "YourWiFi";  // Your Wifi conntion point, i.e. WifI Router
+  const char* password = "YourPassword";  // Password for your router
+  
+  IPAddress IP_Address;  //  ESP32's IP Address placeholder
+  IPAddress XPlaneIP;    //  X-Plane's IP Address placeholder
+  uint16_t Port = 44000;  // ESP32's port to listen on
+  uint16_t XPlanePort = 49000;  //  X-Plane always listens on port 49000
+  const int UDP_Packet_Size = 509;
+  char xmitBuffer[UDP_Packet_Size];  // buffer to hold incoming and outgoing packets
+  AsyncUDP udp;
+  
+// End WiFi Configuration
+// ************************************************************************************************
+
+// ************************************************************************************************
+// ESP-Now Configuration
+  // SSID and password for ESP-Now Network
+  // Ensure the match your Instrument boards
+  const char* ssidDummy = "Dummy";
+  const char* passwordDummy = "dummy!";
+
+  
+  char CONTROLLER[1]{0x2B}; // hex code for plus sign "+".  Indicates ESP-Now packet is from controller
+  char INSTRUMENT[1]{0x2D}; // hex code for minus sign "-".  Indicates ESP-Now packet is from instrument board
+
+  // Give system a uniq ID in case mulitiple systems are 
+  // near each other using same SSID and password for ESP-Now
+  int systemID = 31416;
+
+  // MAC Address of responder - edit as required
+  // All set to 0xFF means broadcast to all listening stations within our ESP-Now network
+  uint8_t broadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+  // Define the data structure for ESPNow packet
+  typedef struct ESPNowMsgStructure {
+    // Origin of ESP-Now packet.
+    // + for contoller
+    // - for instrument cluster
+    char origin[1];
+    // See "int systemID" above
+    int sysID;
+    // Float value for data to be sent to X-Plane
+    float datarefValue;
+    // Dataref key for data being sent
+    // datarefKey_length is set in "X-Plane configuration" section above
+    char datarefKey[datarefKey_length];
+  } ESPNowMsgStructure;
+  
+  // Create a structured objects
+  // Structure for out going data
+  ESPNowMsgStructure ESPNowDataOut;
+  // Structure for in coming data
+  ESPNowMsgStructure ESPNowDataIn;
+
+  // ESP-Now receiving ring buffer
+  // Create a ring buffer to hold incoming ESP-Now packets
+  // Adjust maximum nuber of ESPNowMsgStructure packets that 
+  // can be stored by changing maxBufferElements below
+  const int maxBufferElements = 100;
+  RingBuf<ESPNowMsgStructure, maxBufferElements> ESPNowBuffer;
+  
+
+  // Peer info
+  esp_now_peer_info_t peerInfo;
+
+  // Callback function called when data is sent
+  void OnDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
+    String (status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+  }
+
+  // callback when data is recv from ESP-Now insrument cluster
+  void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *data, int data_len) {
+    if(data_len == sizeof(ESPNowMsgStructure)){ // Check if a full packet was received
+      /* fill the buffer */
+      ESPNowMsgStructure bufferDataIn; // Temperary holding variable to put data in ring buffer
+      memcpy(&bufferDataIn, data, data_len);  // Move incoming data to holding variable
+      ESPNowBuffer.push(bufferDataIn);  // Push incoming data on to ring buffer
+    }
+  }
+// End ESP-Now Configuration
+// ************************************************************************************************
+
+
+void setup() {
+  Serial.begin(115200);
+  
+  WiFiSetup();
+
+  ESPNowSetup();
+
+  UDPSetup();
+
+  printWirelessInfo();
+
+  hardwareSetup();
+}
+
+void loop() {
+  // Check for and get incoming data in ring buffer
+  // .pop returns true if data is available
+  switch(ESPNowBuffer.pop(ESPNowDataIn)){
+    // Data available
+    case true:
+      // Is it from an Instrument board (not another controller)
+      // and does system ID matches our ID
+      switch(ESPNowDataIn.origin[0] == INSTRUMENT[0] && ESPNowDataIn.sysID == systemID){
+        // From an instrument board with our sysyem ID
+        case true:
+          {
+            // Extract Dataref key and value from incoming data
+            // Send to X-Plane via UDP
+            UPDSend(DREF, ESPNowDataIn.datarefValue, ESPNowDataIn.datarefKey);
+          }
+          break;
+        // Data not destined for our system  
+        default:
+          break;
+      }
+      break;
+    // No data available
+    // Nothing to see here
+    // Go about your business
+    default:
+      break;
+  }
+
+  // Check for millis() rollover
+  // Take 49 days to occur
+  checkForRollOver();
+    
+}
+
+void WiFiSetup() {
+  // Set Station Mode
+  WiFi.mode(WIFI_STA);
+  // Connect to WiFi access point (your WiFi router)
+  // Using SSID and password set in "WiFi Configuration" section above
+  WiFi.begin(ssid, password);
+  // wait for connect to be establish
+  if (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    log_e("WiFi Failed");
+    while (1) {
+      delay(1000);
+    }
+  }
+
+  // Store our IP address
+  IP_Address = WiFi.localIP();
+}
+
+void printWirelessInfo(){
+  // Print WiFi info
+  Serial.print("Connected to: ");
+  Serial.print(ssid);
+  Serial.print("\tusing IP_Address: ");
+  Serial.print(IP_Address);
+  Serial.print("\ton WiFi channel: ");
+  Serial.println(WiFi.channel());
+  // Print UDP info
+  Serial.print("UDP Listening on IP: ");
+  Serial.print(IP_Address);
+  Serial.print("\t on port ");
+  Serial.println(Port);
+}
+
+void ESPNowSetup() {
+  // Initilize ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    log_e("Error initializing ESP-NOW");
+    return;
+  }
+  // Register the send callback
+  esp_now_register_send_cb(OnDataSent);
+
+  // Register callback function
+  esp_now_register_recv_cb(OnDataRecv);
+
+  // Register peer
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  // Add peer
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    log_e("Failed to add peer");
+    return;
+  }
+}
+
+void UDPSetup() {
+  // Set up UDP to listen on port set in "WiFi Configuration"
+  if (udp.listen(WiFi.localIP(), Port)) {
+    // If UDP packet received goto UDPReceived function
+    UDPReceived();
+  }
+}
+
+void hardwareSetup(){
+  // Nothing to do here, yet.
+}
+
+void checkForRollOver(){
+  // Check for millis() rollover
+  // Take 49 days to occur
+  switch(millis() < rollover){
+    case true:
+      // reboot ESP32
+      ESP.restart();
+      break;
+    default:
+      rollover = millis();
+      break;
+  }
+}
+
+void UDPReceived() {
+  // UDP packet received
+  udp.onPacket([](AsyncUDPPacket packet) {
+    // Store IP Address of sender
+    XPlaneIP = packet.remoteIP();
+    // Temporary variable to hold Header value
+    String header = "     ";
+    // Copy header from UDP data to temp variable
+    memcpy(&header, packet.data(), 5);
+    // Look for a valid Dataref packet
+    switch(header == "DREF+"){
+      case true:
+        // Valid Dataref packet found
+        {
+          int valueStartPosition = 5;                                             // start after header
+          int floatLength = 4;                                                    // Length of floating point variable in bytes
+          char bufferValue[4];                                                    // To hold Dataref's floating point value (four bytes)
+          memcpy(&bufferValue, packet.data() + valueStartPosition, floatLength);  // Convert value buffer to floating point variable
+
+          char bufferKey[datarefKey_length];                                                        // to hold Dataref's key name
+          memcpy(&bufferKey, packet.data() + valueStartPosition + floatLength, datarefKey_length);  // Convert value buffer to floating point variable
+
+          float xp_value = 0;                                   // Temporary variable to hold Dataref float value
+          String xp_key = "";                                   // Temporary variable to hold Dataref key value
+          memcpy(&xp_value, bufferValue, sizeof(bufferValue));  // Convert value buffer to floating point variable
+          xp_key = bufferKey;                                   // Convert key buffer to string variable
+          
+          sendESPNow(xp_key, xp_value);                         // send data out over ESP-Now
+        }
+        break;
+      default:
+        break;  
+
+    }
+  });
+}
+
+void UPDSend(const char msgType[], float var, char* key) {
+  // Fill transmit buffer with zeros
+  memset(xmitBuffer, 0x00, UDP_Packet_Size);
+  // Put message type in transmit buffer char msgType[4];
+  memcpy(xmitBuffer, msgType, 4);
+  // Put zeroByte in transmit buffer char after message type zeroByte[1]{ 0x00 };
+  memset(xmitBuffer + 4, 0x00, 1);
+  // Put Dataref value in transmit buffer float var;
+  memcpy(xmitBuffer + 5, &var, 4);
+  // Pur Dataref key in transmit buffer
+  strncpy(xmitBuffer + 9, key, 45);
+  // Send assemble packet UDP packet out
+  udp.writeTo((uint8_t*)xmitBuffer, UDP_Packet_Size, XPlaneIP, XPlanePort);
+  
+}
+
+void sendESPNow(String key, float value) {
+  // Broadcast X-Plane dataref over ESP-Now
+  // Format structured data
+  char datarefKeyBuffer[datarefKey_length];
+  ESPNowDataOut.origin[0] = CONTROLLER[0]; // ASCII code for + (plus sign) 0x2B
+  ESPNowDataOut.sysID = systemID;
+
+  key.toCharArray(datarefKeyBuffer, key.length() + 1);
+  strcpy(ESPNowDataOut.datarefKey, datarefKeyBuffer);
+
+  ESPNowDataOut.datarefValue = value;
+  // Send message via ESP-NOW
+  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t*)&ESPNowDataOut, sizeof(ESPNowDataOut));
+
+  if (result == ESP_OK) {
+    //Serial.println("Sending confirmed");
+    log_i("Sending confirmed");
+  } else {
+    //Serial.println("Sending error");
+    log_e("Sending error");
+  }
+}
+

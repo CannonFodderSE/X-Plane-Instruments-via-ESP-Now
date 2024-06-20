@@ -9,13 +9,13 @@ X-Plane uses UDP to send information and receive inputs in what they call Datare
 
 Controller board receives UDP Dataref packets over WiFi then broadcasts the data to all listening Instrument boards.  The ESP-Now packet includes a marker indicating it was from the controller, a system ID number, value for the Dataref sent and Dataref key for a specific function. Only one Dataref per packet.  Since it is broadcast there is no filtering nor routing.  It also receives ESP-Now packets from Instrument boards and relays them to X-Plane via UDP.
 
-Instrument board listens for ESP-Now packets.  It verifies they are from a Controller with a matching system ID.  Compares the Dataref to a list of Datarefs it handles.  Then executes the desired function.  Currently there are no specific functions included.  Have test lighting indicators, displaying data on 7 segment displays.  Switch positions are scanned and a corresponding Dataref is sent to X-Plane when the state changes.  All switch positions are sent at an interval designated at time of compile.
+Instrument board listens for ESP-Now packets.  It verifies they are from a Controller with a matching system ID.  Compares the Dataref to a list of Datarefs it handles.  Then executes the desired function.  Currently there is only support for TM1637 4 and 6 digit displays.  Switch positions are scanned and a corresponding Dataref is sent to X-Plane when the state changes.  All switch positions are sent at an interval designated at time of compile.  Have tested lighting indicators, displaying data on TM1637 4 and 6 digit displays and switches.
 
-I've test this using a generic ESP32-S3-USB-OTG  and a Seeed Studio XIAO ESP32S3. See links below:
+I've test this using a generic ESP32-S3-USB-OTG  and a Seeed Studio XIAO ESP32C3. See links below:
 
 https://www.aliexpress.us/item/3256804864979510.html?pvid=22266b55-fb71-4d55-9fbd-767172ff569a
 
-https://www.seeedstudio.com/XIAO-ESP32S3-p-5627.html
+https://www.seeedstudio.com/Seeed-XIAO-ESP32C3-p-5431.html
 
 I get no kick backs from these links.
 
